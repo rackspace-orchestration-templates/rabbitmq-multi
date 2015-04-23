@@ -1,7 +1,7 @@
 heat_template_version: 2013-05-23
 
 description: |
-  This is a Heat template to deploy a single Linux server running RabbitMQ
+  This is a Heat template to deploy a RabbitMQ cluster
 
 parameter_groups:
 
@@ -71,8 +71,8 @@ parameters:
     constraints:
     - allowed_values:
       - 1
-      - 3
-      - 5
+      - 2
+      - 4
       description: Must be an odd number between 1 and 5, inclusive.
 
 resources:
@@ -98,7 +98,133 @@ resources:
   wait_condition_handle:
     type: OS::Heat::SwiftSignalHandle
 
-  rabbitmq_server:
+  rabbit_nucleus:
+    type: "OS::Nova::Server"
+    properties:
+      name: rabbit-nucleus #{ get_param: server_hostname }
+      flavor: { get_param: flavor }
+      image: { get_param: image }
+      key_name: { get_resource: ssh_key }
+      metadata:
+        rax-heat: { get_param: "OS::stack_id" }
+      config_drive: "true"
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #cloud-config
+            apt_sources:
+              - source: "deb http://www.rabbitmq.com/debian/ testing main"
+                keyid: F7B8CEA6056E8E56
+            package_update: true
+            packages:
+              - curl
+              - python-pip
+              - rabbitmq-server
+              - unzip
+              - supervisor
+              - dnsmasq
+            write_files:
+              - path: /var/lib/rabbitmq/.erlang.cookie
+                permissions: '0400'
+                content: |
+                  %rabbitmq_erlang_cookie%
+              - path: /etc/supervisor/conf.d/consul.conf
+                permissions: '0644'
+                content: |
+                  [program:consul]
+                  command=consul agent -server -bootstrap-expect %rabbitmq_node_count% -data-dir /tmp/consul
+                  autostart=true
+                  autorestart=true
+                  stderr_logfile=/var/log/consul.log
+                  stdout_logfile=/var/log/consul.log
+              - path: /etc/dnsmasq.d/consul_dns.conf
+                permissions: '0644'
+                content: |
+                  server=/consul/127.0.0.1#8600
+              - path: /root/setup/show_registered_hosts
+                permissions: '0500'
+                content: |
+                  #! /usr/bin/env python
+
+                  import consul
+                  import json
+
+                  c = consul.Consul()
+
+                  index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
+
+                  hosts_list = []
+
+                  for key in host_keys:
+                    hostname = key.get("Key").split("/").pop()
+                    ip = key.get("Value")
+                    hosts_list.append({"hostname": hostname, "ip": ip})
+
+                  for host in hosts_list:
+                    print host.get("ip"), host.get("hostname")
+
+              - path: /root/setup/install_rabbitmq.sh
+                permissions: '0500'
+                content: |
+                  #!/bin/bash -ex
+
+                  pip install requests python-consul
+
+                  trap 'error ${LINENO}' ERR
+
+                  wget -O /tmp/consul.zip https://dl.bintray.com/mitchellh/consul/0.5.0_linux_amd64.zip
+                  unzip -d /usr/local/bin/ /tmp/consul.zip
+
+                  while (supervisorctl status consul | grep -v RUNNING)
+                  do
+                    echo "Waiting for consul service status RUNNING..."
+                    sleep 5
+                  done
+
+                  desired_node_count=$(expr %rabbitmq_node_count% + 1)
+
+                  while true
+                  do
+                    line_count=$(consul members | wc -l)
+                    node_count=$(expr $line_count - 1 )
+                    if [ $node_count -lt $desired_node_count ]; then
+                      echo "Only $node_count members, waiting for $desired_node_count..."
+                      sleep 5
+                    else
+                      break
+                    fi
+                  done
+
+                  eth0_ip=$(ifconfig eth0 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
+
+                  curl -X PUT -d $eth0_ip http://localhost:8500/v1/kv/rabbit/hosts/$HOSTNAME
+
+                  while true
+                  do
+                    registered_nodes=$(/root/setup/show_registered_hosts | wc -l)
+                    if [ $desired_node_count -gt $registered_nodes ]; then
+                      echo "waiting for all $desired_node_count nodes to register, currently $registered_nodes have..."
+                      sleep 5
+                    else
+                      echo "got $registered_nodes out of $desired_node_count. Proceeding..."
+                      break
+                    fi
+                  done
+
+                  /root/setup/show_registered_hosts >> /etc/hosts
+
+                  python -c 'import json,requests;requests.put("%wc_notify%",data=json.dumps({"status":"SUCCESS","data":open("/var/log/cloud-init-output.log").read()}))'
+            runcmd:
+              - /root/setup/install_rabbitmq.sh
+          params:
+              '%server_hostname%': { get_param: server_hostname }
+              '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
+              '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
+              '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
+
+  rabbitmq_servers:
+    depends_on: rabbit_nucleus
     type: "OS::Heat::ResourceGroup"
     properties:
       count: { get_param: rabbitmq_node_count }
@@ -125,33 +251,105 @@ resources:
                   - curl
                   - python-pip
                   - rabbitmq-server
+                  - unzip
+                  - supervisor
+                  - dnsmasq
                 write_files:
-                  - path: /etc/rabbitmq/rabbitmq-env.conf
-                    permissions: '0644'
-                    content: |
-                      RABBITMQ_NODENAME=rabbit@`/sbin/ifconfig eth0 | /usr/bin/awk '/inet addr/ {split($2,address,":"); print address[2]}'`
                   - path: /var/lib/rabbitmq/.erlang.cookie
                     permissions: '0400'
                     content: |
                       %rabbitmq_erlang_cookie%
-                  - path: /tmp/node_number
-                    permissions: 600
+                  - path: /etc/supervisor/conf.d/consul.conf
+                    permissions: '0644'
                     content: |
-                      %index%
+                      [program:consul]
+                      command=consul agent -server -data-dir /tmp/consul
+                      autostart=true
+                      autorestart=true
+                      stderr_logfile=/var/log/consul.log
+                      stdout_logfile=/var/log/consul.log
+                  - path: /etc/dnsmasq.d/consul_dns.conf
+                    permissions: '0644'
+                    content: |
+                      server=/consul/127.0.0.1#8600
+                  - path: /root/setup/show_registered_hosts
+                    permissions: '0500'
+                    content: |
+                      #! /usr/bin/env python
+
+                      import consul
+                      import json
+
+                      c = consul.Consul()
+
+                      index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
+
+                      hosts_list = []
+
+                      for key in host_keys:
+                        hostname = key.get("Key").split("/").pop()
+                        ip = key.get("Value")
+                        hosts_list.append({"hostname": hostname, "ip": ip})
+
+                      for host in hosts_list:
+                        print host.get("ip"), host.get("hostname")
+
                   - path: /root/setup/install_rabbitmq.sh
                     permissions: '0500'
                     content: |
                       #!/bin/bash -ex
 
-                      pip install requests
-
-                      error() {
-                        echo "ERROR: exiting at line $1"
-                        python -c 'import json,requests;requests.put("%wc_notify%",data=json.dumps({"status":"FAILURE","data":open("/var/log/cloud-init-output.log").read()}))'
-                        exit "${3:-1}"
-                      }
+                      pip install requests python-consul
 
                       trap 'error ${LINENO}' ERR
+
+                      wget -O /tmp/consul.zip https://dl.bintray.com/mitchellh/consul/0.5.0_linux_amd64.zip
+                      unzip -d /usr/local/bin/ /tmp/consul.zip
+
+                      while (supervisorctl status consul | grep -v RUNNING)
+                      do
+                        echo "Waiting for consul service status RUNNING..."
+                        sleep 5
+                      done
+
+                      echo "waiting for cluster to stabilize..."
+                      sleep 10
+
+                      /usr/local/bin/consul join %rabbitmq_nucleus_publicip%
+
+                      desired_node_count=$(expr %rabbitmq_node_count% + 1)
+
+                      while true
+                      do
+                        line_count=$(consul members | wc -l)
+                        node_count=$(expr $line_count - 1 )
+                        if [ $node_count -lt $desired_node_count ]; then
+                          echo "Only $node_count members, waiting for $desired_node_count..."
+                          sleep 5
+                        else
+                          break
+                        fi
+                      done
+
+                      eth0_ip=$(ifconfig eth0 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
+
+                      curl -X PUT -d $eth0_ip http://localhost:8500/v1/kv/rabbit/hosts/$HOSTNAME
+
+                      while true
+                      do
+                        registered_nodes=$(/root/setup/show_registered_hosts | wc -l)
+                        if [ $desired_node_count -gt $registered_nodes ]; then
+                          echo "waiting for all $desired_node_count nodes to register, currently $registered_nodes have..."
+                          sleep 5
+                        else
+                          echo "got $registered_nodes out of $desired_node_count. Proceeding..."
+                          break
+                        fi
+                      done
+
+                      /root/setup/show_registered_hosts >> /etc/hosts
+
+                      rabbitmqctl stop_app && rabbitmqctl join_cluster rabbit@rabbit-nucleus && rabbitmqctl start_app
 
                       python -c 'import json,requests;requests.put("%wc_notify%",data=json.dumps({"status":"SUCCESS","data":open("/var/log/cloud-init-output.log").read()}))'
                 runcmd:
@@ -160,6 +358,8 @@ resources:
                   '%server_hostname%': { get_param: server_hostname }
                   '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
                   '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
+                  '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
+                  '%rabbitmq_nucleus_publicip%': { get_attr: [rabbit_nucleus, networks, private, 0] }
 
 outputs:
   private_key:
@@ -168,7 +368,7 @@ outputs:
 
   server_ip:
     description: Server IP
-    value: { get_attr: [rabbitmq_server, accessIPv4] }
+    value: { get_attr: [rabbit_nucleus, accessIPv4] }
 
   server_data:
     value: { get_attr: [ wait_condition, data ] }
