@@ -75,6 +75,12 @@ parameters:
       - 4
       description: Must be an odd number between 1 and 5, inclusive.
 
+  rabbitmq_user:
+    label: initial RabbitMQ user account
+    description: The name of the initial RabbitMQ login account
+    type: string
+    default: rabbitmq
+
 resources:
 
   ssh_key:
@@ -89,6 +95,18 @@ resources:
       length: 128
       sequence: lettersdigits
 
+  consul_key:
+    type: OS::Heat::RandomString
+    properties:
+      length: 16
+      sequence: lettersdigits
+
+  rabbitmq_user_password:
+    type: OS::Heat::RandomString
+    properties:
+      length: 32
+      sequence: lettersdigits
+
   wait_condition:
     type: OS::Heat::SwiftSignal
     properties:
@@ -98,13 +116,23 @@ resources:
   wait_condition_handle:
     type: OS::Heat::SwiftSignalHandle
 
+  rabbitmq_network:
+    type: Rackspace::Cloud::Network
+    properties:
+      label: rabbitmq_network
+      cidr: 192.168.134.0/24
+
   rabbit_nucleus:
     type: "OS::Nova::Server"
     properties:
       name: rabbit-nucleus #{ get_param: server_hostname }
       flavor: { get_param: flavor }
       image: { get_param: image }
-      key_name: { get_resource: ssh_key }
+      key_name: jgb-macbookair # { get_resource: ssh_key }
+      networks:
+      - uuid: "00000000-0000-0000-0000-000000000000"
+      - uuid: "11111111-1111-1111-1111-111111111111"
+      - uuid: { get_resource: rabbitmq_network }
       metadata:
         rax-heat: { get_param: "OS::stack_id" }
       config_drive: "true"
@@ -133,15 +161,30 @@ resources:
                 permissions: '0644'
                 content: |
                   [program:consul]
-                  command=consul agent -server -bootstrap-expect %rabbitmq_node_count% -data-dir /tmp/consul
+                  command=/usr/local/lib/supervisor/start_consul.sh
                   autostart=true
                   autorestart=true
                   stderr_logfile=/var/log/consul.log
                   stdout_logfile=/var/log/consul.log
+              - path: /usr/local/lib/supervisor/start_consul.sh
+                permissions: '0700'
+                content: |
+                  #! /bin/bash
+                  exec consul agent \
+                  -server \
+                  -bind $(ifconfig eth2|awk '/inet addr/{ split($2,a,":");print a[2]}') \
+                  -bootstrap-expect %rabbitmq_node_count% \
+                  -encrypt $(echo -n %consul_key%|/usr/bin/base64) \
+                  -data-dir /tmp/consul
               - path: /etc/dnsmasq.d/consul_dns.conf
                 permissions: '0644'
                 content: |
                   server=/consul/127.0.0.1#8600
+              - path: /root/setup/requirements.txt
+                permissions: '0500'
+                content: |
+                  requests
+                  python-consul
               - path: /root/setup/show_registered_hosts
                 permissions: '0500'
                 content: |
@@ -158,7 +201,25 @@ resources:
                 content: |
                   #!/bin/bash -ex
 
-                  pip install requests python-consul
+                  rabbitmqctl delete_user guest
+                  rabbitmqctl add_user %rmq_user% %rmq_password%
+
+                  ufw allow 22    # ssh
+                  ufw enable
+
+                  ufw allow 4369  # RabbitMQ Erlang Port Mapper Daemon (epmd)
+                  ufw allow 35197 # RabbitMQ Erlang clustering
+                  ufw allow 25672 # RabbitMQ Management console
+                  ufw allow 5672  # RabbitMQ ampq
+
+                  ufw allow 8600  # consul DNS
+                  ufw allow 8500  # consul HTTP API
+                  ufw allow 8400  # consul RPC
+                  ufw allow 8300  # consul server RPC
+                  ufw allow 8301  # consul serf LAN port
+                  ufw allow 8302  # consul serf WAN port
+
+                  ( cd /root/setup/ && pip install -r requirements.txt )
 
                   trap 'error ${LINENO}' ERR
 
@@ -211,6 +272,9 @@ resources:
               '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
               '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
               '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
+              '%consul_key%': { get_attr: [consul_key, value] }
+              '%rmq_user%': { get_param: rabbitmq_user }
+              '%rmq_password%': { get_attr: [rabbitmq_user_password, value] }
 
   rabbitmq_servers:
     depends_on: rabbit_nucleus
@@ -223,7 +287,11 @@ resources:
           name: { get_param: server_hostname }
           flavor: { get_param: flavor }
           image: { get_param: image }
-          key_name: { get_resource: ssh_key }
+          key_name: jgb-macbookair # { get_resource: ssh_key }
+          networks:
+          - uuid: "00000000-0000-0000-0000-000000000000"
+          - uuid: "11111111-1111-1111-1111-111111111111"
+          - uuid: { get_resource: rabbitmq_network }
           metadata:
             rax-heat: { get_param: "OS::stack_id" }
           config_drive: "true"
@@ -252,15 +320,29 @@ resources:
                     permissions: '0644'
                     content: |
                       [program:consul]
-                      command=consul agent -server -data-dir /tmp/consul
+                      command=/usr/local/lib/supervisor/start_consul.sh
                       autostart=true
                       autorestart=true
                       stderr_logfile=/var/log/consul.log
                       stdout_logfile=/var/log/consul.log
+                  - path: /usr/local/lib/supervisor/start_consul.sh
+                    permissions: '0700'
+                    content: |
+                      #! /bin/bash
+                      exec consul agent \
+                      -server \
+                      -bind $(ifconfig eth2|awk '/inet addr/{ split($2,a,":");print a[2]}') \
+                      -encrypt $(echo -n %consul_key%|/usr/bin/base64) \
+                      -data-dir /tmp/consul
                   - path: /etc/dnsmasq.d/consul_dns.conf
                     permissions: '0644'
                     content: |
                       server=/consul/127.0.0.1#8600
+                  - path: /root/setup/requirements.txt
+                    permissions: '0500'
+                    content: |
+                      requests
+                      python-consul
                   - path: /root/setup/show_registered_hosts
                     permissions: '0500'
                     content: |
@@ -276,8 +358,21 @@ resources:
                     permissions: '0500'
                     content: |
                       #!/bin/bash -ex
+                      ufw allow 22    # ssh
+                      ufw enable
+                      ufw allow 4369  # RabbitMQ Erlang Port Mapper Daemon (epmd)
+                      ufw allow 35197 # RabbitMQ Erlang clustering
+                      ufw allow 25672 # RabbitMQ Management console
+                      ufw allow 5672  # RabbitMQ ampq
 
-                      pip install requests python-consul
+                      ufw allow 8600  # consul DNS
+                      ufw allow 8500  # consul HTTP API
+                      ufw allow 8400  # consul RPC
+                      ufw allow 8300  # consul server RPC
+                      ufw allow 8301  # consul serf LAN port
+                      ufw allow 8302  # consul serf WAN port
+
+                      ( cd /root/setup/ && pip install -r requirements.txt )
 
                       trap 'error ${LINENO}' ERR
 
@@ -309,6 +404,8 @@ resources:
                         fi
                       done
 
+                      sleep 15
+
                       eth0_ip=$(ifconfig eth0 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
 
                       curl -X PUT -d $eth0_ip http://localhost:8500/v1/kv/rabbit/hosts/$HOSTNAME
@@ -337,7 +434,8 @@ resources:
                   '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
                   '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
                   '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
-                  '%rabbitmq_nucleus_publicip%': { get_attr: [rabbit_nucleus, networks, private, 0] }
+                  '%rabbitmq_nucleus_publicip%': { get_attr: [rabbit_nucleus, networks, rabbitmq_network, 0] }
+                  '%consul_key%': { get_attr: [consul_key, value] }
 
 outputs:
   private_key:
@@ -348,6 +446,18 @@ outputs:
     description: Server IP
     value: { get_attr: [rabbit_nucleus, accessIPv4] }
 
+  nucleus_private_ip:
+    description: cloud network IP of rabbit-nucleus
+    value: { get_attr: [rabbit_nucleus, networks, rabbitmq_network, 0] }
+
   server_data:
     value: { get_attr: [ wait_condition, data ] }
     description: Data from wait condition to report script status
+
+  rabbitmq_user:
+    value: { get_param: rabbitmq_user }
+    description: The RabbitMQ user login which was created
+
+  rabbitmq_password:
+    value: { get_param: rabbitmq_password }
+    description: The RabbitMQ user login password which was generated
