@@ -203,6 +203,7 @@ resources:
 
                   rabbitmqctl delete_user guest
                   rabbitmqctl add_user %rmq_user% %rmq_password%
+                  rabbitmqctl set_permissions %rmq_user% ".*" ".*" ".*" # all permissions by default
 
                   ufw allow 22    # ssh
                   ufw enable
