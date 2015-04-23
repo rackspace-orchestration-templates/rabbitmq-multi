@@ -146,24 +146,13 @@ resources:
                 permissions: '0500'
                 content: |
                   #! /usr/bin/env python
-
-                  import consul
-                  import json
-
+                  import consul, json
                   c = consul.Consul()
-
                   index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
-
-                  hosts_list = []
-
                   for key in host_keys:
                     hostname = key.get("Key").split("/").pop()
                     ip = key.get("Value")
-                    hosts_list.append({"hostname": hostname, "ip": ip})
-
-                  for host in hosts_list:
-                    print host.get("ip"), host.get("hostname")
-
+                    print ip, hostname
               - path: /root/setup/install_rabbitmq.sh
                 permissions: '0500'
                 content: |
@@ -276,24 +265,13 @@ resources:
                     permissions: '0500'
                     content: |
                       #! /usr/bin/env python
-
-                      import consul
-                      import json
-
+                      import consul, json
                       c = consul.Consul()
-
                       index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
-
-                      hosts_list = []
-
                       for key in host_keys:
                         hostname = key.get("Key").split("/").pop()
                         ip = key.get("Value")
-                        hosts_list.append({"hostname": hostname, "ip": ip})
-
-                      for host in hosts_list:
-                        print host.get("ip"), host.get("hostname")
-
+                        print ip, hostname
                   - path: /root/setup/install_rabbitmq.sh
                     permissions: '0500'
                     content: |
