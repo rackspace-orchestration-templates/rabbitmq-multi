@@ -122,88 +122,95 @@ resources:
       label: rabbitmq_network
       cidr: 192.168.134.0/24
 
-  rabbit_nucleus:
-    type: "OS::Nova::Server"
+  rabbitmq_cloud_init:
+    type: OS::Heat::CloudConfig
     properties:
-      name: rabbit-nucleus #{ get_param: server_hostname }
-      flavor: { get_param: flavor }
-      image: { get_param: image }
-      key_name: jgb-macbookair # { get_resource: ssh_key }
-      networks:
-      - uuid: "00000000-0000-0000-0000-000000000000"
-      - uuid: "11111111-1111-1111-1111-111111111111"
-      - uuid: { get_resource: rabbitmq_network }
-      metadata:
-        rax-heat: { get_param: "OS::stack_id" }
-      config_drive: "true"
-      user_data_format: RAW
-      user_data:
-        str_replace:
-          template: |
-            #cloud-config
-            apt_sources:
-              - source: "deb http://www.rabbitmq.com/debian/ testing main"
-                keyid: F7B8CEA6056E8E56
-            package_update: true
-            packages:
-              - curl
-              - python-pip
-              - rabbitmq-server
-              - unzip
-              - supervisor
-              - dnsmasq
-            write_files:
-              - path: /var/lib/rabbitmq/.erlang.cookie
-                permissions: '0400'
-                content: |
+      cloud_config:
+        apt_sources:
+          - source: "deb http://www.rabbitmq.com/debian/ testing main"
+            keyid: F7B8CEA6056E8E56
+        package_update: true
+        packages:
+          - curl
+          - python-pip
+          - rabbitmq-server
+          - unzip
+          - supervisor
+          - dnsmasq
+        write_files:
+          - path: /var/lib/rabbitmq/.erlang.cookie
+            permissions: '0400'
+            content:
+              str_replace:
+                template: |
                   %rabbitmq_erlang_cookie%
-              - path: /etc/supervisor/conf.d/consul.conf
-                permissions: '0644'
-                content: |
-                  [program:consul]
-                  command=/usr/local/lib/supervisor/start_consul.sh
-                  autostart=true
-                  autorestart=true
-                  stderr_logfile=/var/log/consul.log
-                  stdout_logfile=/var/log/consul.log
-              - path: /usr/local/lib/supervisor/start_consul.sh
-                permissions: '0700'
-                content: |
+                params:
+                  '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
+          - path: /etc/supervisor/conf.d/consul.conf
+            permissions: '0644'
+            content: |
+              [program:consul]
+              command=/usr/local/lib/supervisor/start_consul.sh
+              autostart=true
+              autorestart=true
+              stderr_logfile=/var/log/consul.log
+              stdout_logfile=/var/log/consul.log
+          - path: /usr/local/lib/supervisor/start_consul.sh
+            permissions: '0700'
+            content:
+              str_replace:
+                template: |
                   #! /bin/bash
+
+                  if [ $HOSTNAME = rabbit-nucleus ]; then
+                    BOOTSTRAP_EXPECT="-bootstrap-expect"
+                    BOOTSTRAP_EXPECT_ARG=%rabbitmq_node_count%
+                  else
+                    BOOTSTRAP_EXPECT=""
+                    BOOTSTRAP_EXPECT_ARG=""
+                  fi
+
                   exec consul agent \
                   -server \
                   -bind $(ifconfig eth2|awk '/inet addr/{ split($2,a,":");print a[2]}') \
-                  -bootstrap-expect %rabbitmq_node_count% \
+                  $BOOTSTRAP_EXPECT $BOOTSTRAP_EXPECT_ARG \
                   -encrypt $(echo -n %consul_key%|/usr/bin/base64) \
                   -data-dir /tmp/consul
-              - path: /etc/dnsmasq.d/consul_dns.conf
-                permissions: '0644'
-                content: |
-                  server=/consul/127.0.0.1#8600
-              - path: /root/setup/requirements.txt
-                permissions: '0500'
-                content: |
-                  requests
-                  python-consul
-              - path: /root/setup/show_registered_hosts
-                permissions: '0500'
-                content: |
-                  #! /usr/bin/env python
-                  import consul, json
-                  c = consul.Consul()
-                  index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
-                  for key in host_keys:
-                    hostname = key.get("Key").split("/").pop()
-                    ip = key.get("Value")
-                    print ip, hostname
-              - path: /root/setup/install_rabbitmq.sh
-                permissions: '0500'
-                content: |
+                params:
+                  '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
+                  '%consul_key%': { get_attr: [consul_key, value] }
+          - path: /etc/dnsmasq.d/consul_dns.conf
+            permissions: '0644'
+            content: |
+              server=/consul/127.0.0.1#8600
+          - path: /root/setup/requirements.txt
+            permissions: '0500'
+            content: |
+              requests
+              python-consul
+          - path: /root/setup/show_registered_hosts
+            permissions: '0500'
+            content: |
+              #! /usr/bin/env python
+              import consul, json
+              c = consul.Consul()
+              index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
+              for key in host_keys:
+                hostname = key.get("Key").split("/").pop()
+                ip = key.get("Value")
+                print ip, hostname
+          - path: /root/setup/install_rabbitmq.sh
+            permissions: '0500'
+            content:
+              str_replace:
+                template: |
                   #!/bin/bash -ex
 
-                  rabbitmqctl delete_user guest
-                  rabbitmqctl add_user %rmq_user% %rmq_password%
-                  rabbitmqctl set_permissions %rmq_user% ".*" ".*" ".*" # all permissions by default
+                  if [ $HOSTNAME = rabbit-nucleus ]; then
+                    rabbitmqctl delete_user guest
+                    rabbitmqctl add_user %rmq_user% %rmq_password%
+                    rabbitmqctl set_permissions %rmq_user% ".*" ".*" ".*" # all permissions by default
+                  fi
 
                   ufw allow 22    # ssh
                   ufw enable
@@ -232,6 +239,13 @@ resources:
                     echo "Waiting for consul service status RUNNING..."
                     sleep 5
                   done
+
+                  if [ $HOSTNAME != rabbit-nucleus ]; then
+                    echo "waiting for cluster to stabilize..."
+                    sleep 10
+                    echo "joining consul cluster at nucleus ip %rabbitmq_nucleus_publicip%..."
+                    /usr/local/bin/consul join %rabbitmq_nucleus_publicip%
+                  fi
 
                   desired_node_count=$(expr %rabbitmq_node_count% + 1)
 
@@ -265,17 +279,36 @@ resources:
 
                   /root/setup/show_registered_hosts >> /etc/hosts
 
+                  if [ $HOSTNAME != rabbit-nucleus ]; then
+                    rabbitmqctl stop_app && rabbitmqctl join_cluster rabbit@rabbit-nucleus && rabbitmqctl start_app
+                  fi
+
                   python -c 'import json,requests;requests.put("%wc_notify%",data=json.dumps({"status":"SUCCESS","data":open("/var/log/cloud-init-output.log").read()}))'
-            runcmd:
-              - /root/setup/install_rabbitmq.sh
-          params:
-              '%server_hostname%': { get_param: server_hostname }
-              '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
-              '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
-              '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
-              '%consul_key%': { get_attr: [consul_key, value] }
-              '%rmq_user%': { get_param: rabbitmq_user }
-              '%rmq_password%': { get_attr: [rabbitmq_user_password, value] }
+                params:
+                  '%rmq_user%': { get_param: rabbitmq_user }
+                  '%rmq_password%': { get_attr: [rabbitmq_user_password, value] }
+                  '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
+                  '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
+                  '%rabbitmq_nucleus_publicip%': 192.168.134.1
+        runcmd:
+          - /root/setup/install_rabbitmq.sh
+
+  rabbit_nucleus:
+    type: "OS::Nova::Server"
+    properties:
+      name: rabbit-nucleus #{ get_param: server_hostname }
+      flavor: { get_param: flavor }
+      image: { get_param: image }
+      key_name: { get_resource: ssh_key }
+      networks:
+      - uuid: "00000000-0000-0000-0000-000000000000"
+      - uuid: "11111111-1111-1111-1111-111111111111"
+      - uuid: { get_resource: rabbitmq_network }
+      metadata:
+        rax-heat: { get_param: "OS::stack_id" }
+      config_drive: "true"
+      user_data_format: RAW
+      user_data: { get_resource: rabbitmq_cloud_init }
 
   rabbitmq_servers:
     depends_on: rabbit_nucleus
@@ -288,7 +321,7 @@ resources:
           name: { get_param: server_hostname }
           flavor: { get_param: flavor }
           image: { get_param: image }
-          key_name: jgb-macbookair # { get_resource: ssh_key }
+          key_name: { get_resource: ssh_key }
           networks:
           - uuid: "00000000-0000-0000-0000-000000000000"
           - uuid: "11111111-1111-1111-1111-111111111111"
@@ -297,146 +330,7 @@ resources:
             rax-heat: { get_param: "OS::stack_id" }
           config_drive: "true"
           user_data_format: RAW
-          user_data:
-            str_replace:
-              template: |
-                #cloud-config
-                apt_sources:
-                  - source: "deb http://www.rabbitmq.com/debian/ testing main"
-                    keyid: F7B8CEA6056E8E56
-                package_update: true
-                packages:
-                  - curl
-                  - python-pip
-                  - rabbitmq-server
-                  - unzip
-                  - supervisor
-                  - dnsmasq
-                write_files:
-                  - path: /var/lib/rabbitmq/.erlang.cookie
-                    permissions: '0400'
-                    content: |
-                      %rabbitmq_erlang_cookie%
-                  - path: /etc/supervisor/conf.d/consul.conf
-                    permissions: '0644'
-                    content: |
-                      [program:consul]
-                      command=/usr/local/lib/supervisor/start_consul.sh
-                      autostart=true
-                      autorestart=true
-                      stderr_logfile=/var/log/consul.log
-                      stdout_logfile=/var/log/consul.log
-                  - path: /usr/local/lib/supervisor/start_consul.sh
-                    permissions: '0700'
-                    content: |
-                      #! /bin/bash
-                      exec consul agent \
-                      -server \
-                      -bind $(ifconfig eth2|awk '/inet addr/{ split($2,a,":");print a[2]}') \
-                      -encrypt $(echo -n %consul_key%|/usr/bin/base64) \
-                      -data-dir /tmp/consul
-                  - path: /etc/dnsmasq.d/consul_dns.conf
-                    permissions: '0644'
-                    content: |
-                      server=/consul/127.0.0.1#8600
-                  - path: /root/setup/requirements.txt
-                    permissions: '0500'
-                    content: |
-                      requests
-                      python-consul
-                  - path: /root/setup/show_registered_hosts
-                    permissions: '0500'
-                    content: |
-                      #! /usr/bin/env python
-                      import consul, json
-                      c = consul.Consul()
-                      index, host_keys = c.kv.get("rabbit/hosts",recurse=True)
-                      for key in host_keys:
-                        hostname = key.get("Key").split("/").pop()
-                        ip = key.get("Value")
-                        print ip, hostname
-                  - path: /root/setup/install_rabbitmq.sh
-                    permissions: '0500'
-                    content: |
-                      #!/bin/bash -ex
-                      ufw allow 22    # ssh
-                      ufw enable
-                      ufw allow 4369  # RabbitMQ Erlang Port Mapper Daemon (epmd)
-                      ufw allow 35197 # RabbitMQ Erlang clustering
-                      ufw allow 25672 # RabbitMQ Management console
-                      ufw allow 5672  # RabbitMQ ampq
-
-                      ufw allow 8600  # consul DNS
-                      ufw allow 8500  # consul HTTP API
-                      ufw allow 8400  # consul RPC
-                      ufw allow 8300  # consul server RPC
-                      ufw allow 8301  # consul serf LAN port
-                      ufw allow 8302  # consul serf WAN port
-
-                      ( cd /root/setup/ && pip install -r requirements.txt )
-
-                      trap 'error ${LINENO}' ERR
-
-                      wget -O /tmp/consul.zip https://dl.bintray.com/mitchellh/consul/0.5.0_linux_amd64.zip
-                      unzip -d /usr/local/bin/ /tmp/consul.zip
-
-                      while (supervisorctl status consul | grep -v RUNNING)
-                      do
-                        echo "Waiting for consul service status RUNNING..."
-                        sleep 5
-                      done
-
-                      echo "waiting for cluster to stabilize..."
-                      sleep 10
-
-                      /usr/local/bin/consul join %rabbitmq_nucleus_publicip%
-
-                      desired_node_count=$(expr %rabbitmq_node_count% + 1)
-
-                      while true
-                      do
-                        line_count=$(consul members | wc -l)
-                        node_count=$(expr $line_count - 1 )
-                        if [ $node_count -lt $desired_node_count ]; then
-                          echo "Only $node_count members, waiting for $desired_node_count..."
-                          sleep 5
-                        else
-                          break
-                        fi
-                      done
-
-                      sleep 15
-
-                      eth0_ip=$(ifconfig eth0 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
-
-                      curl -X PUT -d $eth0_ip http://localhost:8500/v1/kv/rabbit/hosts/$HOSTNAME
-
-                      while true
-                      do
-                        registered_nodes=$(/root/setup/show_registered_hosts | wc -l)
-                        if [ $desired_node_count -gt $registered_nodes ]; then
-                          echo "waiting for all $desired_node_count nodes to register, currently $registered_nodes have..."
-                          sleep 5
-                        else
-                          echo "got $registered_nodes out of $desired_node_count. Proceeding..."
-                          break
-                        fi
-                      done
-
-                      /root/setup/show_registered_hosts >> /etc/hosts
-
-                      rabbitmqctl stop_app && rabbitmqctl join_cluster rabbit@rabbit-nucleus && rabbitmqctl start_app
-
-                      python -c 'import json,requests;requests.put("%wc_notify%",data=json.dumps({"status":"SUCCESS","data":open("/var/log/cloud-init-output.log").read()}))'
-                runcmd:
-                  - /root/setup/install_rabbitmq.sh
-              params:
-                  '%server_hostname%': { get_param: server_hostname }
-                  '%wc_notify%': { get_attr: ['wait_condition_handle', 'endpoint'] }
-                  '%rabbitmq_erlang_cookie%': { get_attr: [rabbitmq_erlang_cookie, value] }
-                  '%rabbitmq_node_count%': { get_param: ['rabbitmq_node_count'] }
-                  '%rabbitmq_nucleus_publicip%': { get_attr: [rabbit_nucleus, networks, rabbitmq_network, 0] }
-                  '%consul_key%': { get_attr: [consul_key, value] }
+          user_data: { get_resource: rabbitmq_cloud_init }
 
 outputs:
   private_key:
