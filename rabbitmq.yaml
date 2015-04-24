@@ -71,8 +71,8 @@ parameters:
     constraints:
     - allowed_values:
       - 1
-      - 2
-      - 4
+      - 3
+      - 5
       description: Must be an odd number between 1 and 5, inclusive.
 
   rabbitmq_user:
@@ -161,19 +161,10 @@ resources:
               str_replace:
                 template: |
                   #! /bin/bash
-
-                  if [ $HOSTNAME = rabbit-nucleus ]; then
-                    BOOTSTRAP_EXPECT="-bootstrap-expect"
-                    BOOTSTRAP_EXPECT_ARG=%rabbitmq_node_count%
-                  else
-                    BOOTSTRAP_EXPECT=""
-                    BOOTSTRAP_EXPECT_ARG=""
-                  fi
-
                   exec consul agent \
                   -server \
                   -bind $(ifconfig eth2|awk '/inet addr/{ split($2,a,":");print a[2]}') \
-                  $BOOTSTRAP_EXPECT $BOOTSTRAP_EXPECT_ARG \
+                  -bootstrap-expect %rabbitmq_node_count% \
                   -encrypt $(echo -n %consul_key%|/usr/bin/base64) \
                   -data-dir /tmp/consul
                 params:
@@ -205,8 +196,7 @@ resources:
               str_replace:
                 template: |
                   #!/bin/bash -ex
-
-                  if [ $HOSTNAME = rabbit-nucleus ]; then
+                  if [ $HOSTNAME = rabbit-0 ]; then
                     rabbitmqctl delete_user guest
                     rabbitmqctl add_user %rmq_user% %rmq_password%
                     rabbitmqctl set_permissions %rmq_user% ".*" ".*" ".*" # all permissions by default
@@ -240,14 +230,19 @@ resources:
                     sleep 5
                   done
 
-                  if [ $HOSTNAME != rabbit-nucleus ]; then
-                    echo "waiting for cluster to stabilize..."
-                    sleep 10
-                    echo "joining consul cluster at nucleus ip %rabbitmq_nucleus_publicip%..."
+                  eth0_ip=$(ifconfig eth0 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
+                  eth2_ip=$(ifconfig eth2 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
+
+                  if [ $eth2_ip != %rabbitmq_nucleus_publicip% ]; then
+                    sleep_interval=$(expr $RANDOM % 16 + 10)
+                    echo "waiting $sleep_interval seconds for cluster to stabilize..."
+                    sleep $sleep_interval
+                    echo "joining consul cluster at rabbit-0 ip %rabbitmq_nucleus_publicip%..."
                     /usr/local/bin/consul join %rabbitmq_nucleus_publicip%
+                    echo "sleeping for leader election completion..."; sleep 15
                   fi
 
-                  desired_node_count=$(expr %rabbitmq_node_count% + 1)
+                  desired_node_count=$(expr %rabbitmq_node_count%)
 
                   while true
                   do
@@ -261,9 +256,7 @@ resources:
                     fi
                   done
 
-                  eth0_ip=$(ifconfig eth0 | awk '/inet addr/ { split($2,a,":"); print a[2]}')
-
-                  curl -X PUT -d $eth0_ip http://localhost:8500/v1/kv/rabbit/hosts/$HOSTNAME
+                  curl -X PUT -d $eth2_ip http://localhost:8500/v1/kv/rabbit/hosts/$HOSTNAME
 
                   while true
                   do
@@ -279,8 +272,8 @@ resources:
 
                   /root/setup/show_registered_hosts >> /etc/hosts
 
-                  if [ $HOSTNAME != rabbit-nucleus ]; then
-                    rabbitmqctl stop_app && rabbitmqctl join_cluster rabbit@rabbit-nucleus && rabbitmqctl start_app
+                  if [ $HOSTNAME != rabbit-0 ]; then
+                    rabbitmqctl stop_app && rabbitmqctl join_cluster rabbit@rabbit-0 && rabbitmqctl start_app
                   fi
 
                   python -c 'import json,requests;requests.put("%wc_notify%",data=json.dumps({"status":"SUCCESS","data":open("/var/log/cloud-init-output.log").read()}))'
@@ -293,25 +286,7 @@ resources:
         runcmd:
           - /root/setup/install_rabbitmq.sh
 
-  rabbit_nucleus:
-    type: "OS::Nova::Server"
-    properties:
-      name: rabbit-nucleus #{ get_param: server_hostname }
-      flavor: { get_param: flavor }
-      image: { get_param: image }
-      key_name: { get_resource: ssh_key }
-      networks:
-      - uuid: "00000000-0000-0000-0000-000000000000"
-      - uuid: "11111111-1111-1111-1111-111111111111"
-      - uuid: { get_resource: rabbitmq_network }
-      metadata:
-        rax-heat: { get_param: "OS::stack_id" }
-      config_drive: "true"
-      user_data_format: RAW
-      user_data: { get_resource: rabbitmq_cloud_init }
-
   rabbitmq_servers:
-    depends_on: rabbit_nucleus
     type: "OS::Heat::ResourceGroup"
     properties:
       count: { get_param: rabbitmq_node_count }
@@ -337,17 +312,9 @@ outputs:
     description: SSH Private Key
     value: { get_attr: [ssh_key, private_key] }
 
-  server_ip:
+  server_ips:
     description: Server IP
-    value: { get_attr: [rabbit_nucleus, accessIPv4] }
-
-  nucleus_private_ip:
-    description: cloud network IP of rabbit-nucleus
-    value: { get_attr: [rabbit_nucleus, networks, rabbitmq_network, 0] }
-
-  server_data:
-    value: { get_attr: [ wait_condition, data ] }
-    description: Data from wait condition to report script status
+    value: { get_attr: [rabbitmq_servers, accessIPv4] }
 
   rabbitmq_user:
     value: { get_param: rabbitmq_user }
