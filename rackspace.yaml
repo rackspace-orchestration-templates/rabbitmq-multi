@@ -1,0 +1,29 @@
+schema-version: 1.0.0
+application-family: Miscellaneous
+application-name: RabbitMQ
+application-version: 6.4
+flavor: Multiple Linux Servers
+flavor-weight: 1
+reach-info:
+  tattoo: http://drop.duncancreek.net/bigtaco.jpg
+  icon-20x20: http://drop.duncancreek.net/Beef+Taco.png
+hidden_outputs:
+  - private_key
+  - rabbitmq_password
+abstract: |
+  Multiple Linux servers running RabbitMQ. Lorem ipsum dolor sit amet,
+  consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et
+  dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation
+  ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure
+  dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat
+  nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in
+  culpa qui officia deserunt mollit anim id est laborum.
+instructions: |
+  Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod
+  tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam,
+  quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+  consequat. Duis aute irure dolor in reprehenderit in voluptate velit
+  esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat
+  cupidatat non proident, sunt in culpa qui officia deserunt mollit anim
+  id est laborum.
+user-input-required: false
