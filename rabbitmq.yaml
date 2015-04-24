@@ -321,5 +321,5 @@ outputs:
     description: The RabbitMQ user login which was created
 
   rabbitmq_password:
-    value: { get_param: rabbitmq_password }
+    value: { get_attr: [rabbitmq_user_password, value] }
     description: The RabbitMQ user login password which was generated
