@@ -27,3 +27,6 @@ instructions: |
   cupidatat non proident, sunt in culpa qui officia deserunt mollit anim
   id est laborum.
 user-input-required: false
+description: |
+  Multiple Linux servers running RabbitMQ version 6.4. The default amount of
+  servers provisioned is 1, unless otherwise specified.
