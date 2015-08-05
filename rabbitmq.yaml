@@ -1,7 +1,8 @@
 heat_template_version: 2013-05-23
 
 description: |
-  This is a Heat template to deploy a RabbitMQ cluster
+  Multiple Linux servers running RabbitMQ version 6.4. The default amount of
+  servers provisioned is 1, unless otherwise specified.
 
 parameter_groups:
 
